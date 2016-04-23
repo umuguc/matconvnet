@@ -2,7 +2,7 @@
 # author: Andrea Vedaldi
 # brief: matconvnet makefile for mex files
 
-# Copyright (C) 2014-15 Andrea Vedaldi
+# Copyright (C) 2014-16 Andrea Vedaldi
 # All rights reserved.
 #
 # This file is part of the VLFeat library and is made available under
@@ -15,14 +15,15 @@
 ENABLE_GPU ?=
 ENABLE_CUDNN ?=
 ENABLE_IMREADJPEG ?= yes
+ENABLE_DOUBLE ?= yes
 DEBUG ?=
 ARCH ?= maci64
 
 # Configure MATLAB
-MATLABROOT ?= /Applications/MATLAB_R2014b.app
+MATLABROOT ?= /Applications/MATLAB_R2015a.app
 
 # Configure CUDA and CuDNN. CUDAMETHOD can be either 'nvcc' or 'mex'.
-CUDAROOT ?= /Developer/NVIDIA/CUDA-5.5
+CUDAROOT ?= /Developer/NVIDIA/CUDA-6.5
 CUDNNROOT ?= $(CURDIR)/local/
 CUDAMETHOD ?= $(if $(ENABLE_CUDNN),nvcc,mex)
 
@@ -34,18 +35,22 @@ IMAGELIB_LDFLAGS ?= $(IMAGELIB_LDFLAGS_DEFAULT)
 
 # Remark: each MATLAB version requires a particular CUDA Toolkit version.
 # Note that multiple CUDA Toolkits can be installed.
-#MATLABROOT ?= /Applications/MATLAB_R2013b.app
-#CUDAROOT ?= /Developer/NVIDIA/CUDA-5.5
 #MATLABROOT ?= /Applications/MATLAB_R2014b.app
 #CUDAROOT ?= /Developer/NVIDIA/CUDA-6.0
+#MATLABROOT ?= /Applications/MATLAB_R2015a.app
+#CUDAROOT ?= /Developer/NVIDIA/CUDA-7.0
+#MATLABROOT ?= /Applications/MATLAB_R2015b.app
+#CUDAROOT ?= /Developer/NVIDIA/CUDA-7.5
 
 # Maintenance
 NAME = matconvnet
-VER = 1.0-beta10
+VER = 1.0-beta19
 DIST = $(NAME)-$(VER)
+LATEST = $(NAME)-latest
 RSYNC = rsync
 HOST = vlfeat-admin:sites/sandbox-matconvnet
 GIT = git
+SHELL = /bin/bash # sh not good enough
 
 # --------------------------------------------------------------------
 #                                                        Configuration
@@ -56,22 +61,39 @@ MEX = $(MATLABROOT)/bin/mex
 MEXEXT = $(MATLABROOT)/bin/mexext
 MEXARCH = $(subst mex,,$(shell $(MEXEXT)))
 MEXOPTS ?= matlab/src/config/mex_CUDA_$(ARCH).xml
-MEXFLAGS = -largeArrayDims -lmwblas \
-$(if $(ENABLE_GPU),-DENABLE_GPU,) \
-$(if $(ENABLE_CUDNN),-DENABLE_CUDNN -I$(CUDNNROOT),)
-MEXFLAGS_GPU = $(MEXFLAGS) -f "$(MEXOPTS)"
-SHELL = /bin/bash # sh not good enough
-NVCC = $(CUDAROOT)/bin/nvcc
 
-# this is used *onyl* for the 'nvcc' method
-NVCCFLAGS = \
--gencode=arch=compute_30,code=\"sm_30,compute_30\" \
--DENABLE_GPU \
-$(if $(ENABLE_CUDNN),-DENABLE_CUDNN -I$(CUDNNROOT),) \
+# We define four set of command line options:
+#
+# 1.   MEXFLAGS_CPU: options for the `mex` command to compile or link
+#      a CPU-only object file or MEX file.
+# 2.   MEXFLAGS_GPU: options for the `mex` command to compile or link
+#      a CUDA object file or MEX file.
+# 3.   MEXFLAGS_GPU_LINK: options for the `mex` command to link
+#      a CUDA object file or MEX fil.
+# 4.   NVCCFLAGS: optios for the `nvcc` command to compile
+#      a CUDA object or MEX file.
+
+CCFLAGS = \
+$(if $(ENABLE_GPU),-DENABLE_GPU,) \
+$(if $(ENABLE_CUDNN),-DENABLE_CUDNN -I$(CUDNNROOT)/include,) \
+$(if $(ENABLE_DOUBLE),-DENABLE_DOUBLE,) \
+$(if $(VERB),-v,)
+
+MEXFLAGS = $(CCFLAGS) -cxx -largeArrayDims -lmwblas
+MEXFLAGS_CPU = $(MEXFLAGS)
+MEXFLAGS_GPU = $(MEXFLAGS) -f "$(MEXOPTS)"
+MEXFLAGS_GPU_LINK = $(MEXFLAGS) -lmwgpu
+
+NVCC = $(CUDAROOT)/bin/nvcc
+NVCCVER = $(shell $(NVCC) --version | \
+sed -n 's/.*V\([0-9]*\).\([0-9]*\).\([0-9]*\).*/\1 \2 \3/p' | \
+xargs printf '%02d%02d%02d')
+NVCCVER_LT_70 = $(shell test $(NVCCVER) -lt 070000 && echo true)
+NVCCFLAGS = $(CCFLAGS) \
 -I"$(MATLABROOT)/extern/include" \
 -I"$(MATLABROOT)/toolbox/distcomp/gpu/extern/include" \
+-gencode=arch=compute_30,code=\"sm_30,compute_30\" \
 -Xcompiler -fPIC
-MEXFLAGS_NVCC = $(MEXFLAGS) -cxx -lmwgpu
 
 ifneq ($(DEBUG),)
 MEXFLAGS += -g
@@ -80,30 +102,47 @@ else
 MEXFLAGS += -DNDEBUG -O
 NVCCFLAGS += -DNDEBUG -O3
 # we still want debug symbols
-MEXFLAGS += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -g -O3'
+MEXFLAGS += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -g'
 MEXFLAGS += LDOPTIMFLAGS='$$LDOPTIMFLAGS -g'
 NVCCFLAGS += -g
 endif
 
-ifdef VERB
-MEXFLAGS += -v
-NVCCFLAGS += -v
-endif
+# Rpath to CUDA and CuDNN for convenience (required on recent versions of Mac OS X)
+comma:=,
 
-# Mac OS X Intel
+# Mac OS X
 ifeq "$(ARCH)" "$(filter $(ARCH),maci64)"
-MEXFLAGS_GPU += -L$(CUDAROOT)/lib
-MEXFLAGS_NVCC += -L$(CUDAROOT)/lib LDFLAGS='$$LDFLAGS -stdlib=libstdc++'
 IMAGELIB_DEFAULT = quartz
+
+NVCCFLAGS += -Xcompiler -mssse3,-ffast-math,-mmacosx-version-min=10.9
+MEXFLAGS_CPU += CXXFLAGS='$$CXXFLAGS -mmacosx-version-min=10.9'
+MEXFLAGS_GPU += CXXFLAGS='$$CXXFLAGS -Xcompiler -mmacosx-version-min=10.9'
+MEXFLAGS_CPU += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -mssse3 -ffast-math'
+MEXFLAGS_GPU += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -Xcompiler -mssse3,-ffast-math'
+
+LDFLAGS_GPU := -Wl,-rpath -Wl,"$(CUDAROOT)/lib"
+LDFLAGS_GPU += $(if $(ENABLE_CUDNN),-Wl$(comma)-rpath -Wl$(comma)"$(CUDNNROOT)/lib",)
+ifeq ($(NVCCVER_LT_70),true)
+LDFLAGS_GPU += -stdlib=libstdc++
+endif
+MEXLDFLAGS_GPU := -L"$(CUDAROOT)/lib" $(if $(ENABLE_CUDNN),-L"$(CUDNNROOT)/lib",) LDFLAGS='$$LDFLAGS $(LDFLAGS_GPU)'
+MEXFLAGS_GPU += $(MEXLDFLAGS_GPU)
+MEXFLAGS_GPU_LINK += $(MEXLDFLAGS_GPU)
 endif
 
 # Linux
 ifeq "$(ARCH)" "$(filter $(ARCH),glnxa64)"
-MEXFLAGS_GPU += -L$(CUDAROOT)/lib64
-MEXFLAGS_NVCC += -L$(CUDAROOT)/lib64
 IMAGELIB_DEFAULT = libjpeg
-MEXFLAGS += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -mssse3 -ftree-vect-loop-version -ffast-math -funroll-all-loops'
+
 NVCCFLAGS += -Xcompiler -mssse3,-ftree-vect-loop-version,-ffast-math,-funroll-all-loops
+MEXFLAGS_CPU += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -mssse3 -ftree-vect-loop-version -ffast-math -funroll-all-loops'
+MEXFLAGS_GPU += CXXOPTIMFLAGS='$$CXXOPTIMFLAGS -Xcompiler -mssse3,-ftree-vect-loop-version,-ffast-math,-funroll-all-loops'
+
+LDFLAGS_GPU := -Wl,-rpath -Wl,"$(CUDAROOT)/lib64"
+LDFLAGS_GPU += $(if $(ENABLE_CUDNN),-Wl$(comma)-rpath -Wl$(comma)"$(CUDNNROOT)/lib64",)
+MEXLDFLAGS_GPU := -L"$(CUDAROOT)/lib64" $(if $(ENABLE_CUDNN),-L"$(CUDNNROOT)/lib64",) LDFLAGS='$$LDFLAGS $(LDFLAGS_GPU)'
+MEXFLAGS_GPU += $(MEXLDFLAGS_GPU)
+MEXFLAGS_GPU_LINK += $(MEXLDFLAGS_GPU)
 endif
 
 # Image library
@@ -119,8 +158,8 @@ ifdef ENABLE_IMREADJPEG
 MEXFLAGS += $(IMAGELIB_CFLAGS) $(IMAGELIB_LDFLAGS)
 endif
 
-MEXFLAGS_GPU += -lcublas -lcudart $(if $(ENABLE_CUDNN),-L$(CUDNNROOT) -lcudnn,)
-MEXFLAGS_NVCC += -lcublas -lcudart $(if $(ENABLE_CUDNN),-L$(CUDNNROOT) -lcudnn,)
+MEXFLAGS_GPU += -lcublas -lcudart $(if $(ENABLE_CUDNN),-lcudnn,)
+MEXFLAGS_GPU_LINK += -lcublas -lcudart $(if $(ENABLE_CUDNN),-lcudnn,)
 
 # --------------------------------------------------------------------
 #                                                      Build MEX files
@@ -136,13 +175,17 @@ ext := $(if $(ENABLE_GPU),cu,cpp)
 cpp_src+=matlab/src/bits/data.$(ext)
 cpp_src+=matlab/src/bits/datamex.$(ext)
 cpp_src+=matlab/src/bits/nnconv.$(ext)
+cpp_src+=matlab/src/bits/nnbias.$(ext)
 cpp_src+=matlab/src/bits/nnfullyconnected.$(ext)
 cpp_src+=matlab/src/bits/nnsubsample.$(ext)
 cpp_src+=matlab/src/bits/nnpooling.$(ext)
 cpp_src+=matlab/src/bits/nnnormalize.$(ext)
+cpp_src+=matlab/src/bits/nnbnorm.$(ext)
 mex_src+=matlab/src/vl_nnconv.$(ext)
+mex_src+=matlab/src/vl_nnconvt.$(ext)
 mex_src+=matlab/src/vl_nnpool.$(ext)
 mex_src+=matlab/src/vl_nnnormalize.$(ext)
+mex_src+=matlab/src/vl_nnbnorm.$(ext)
 ifdef ENABLE_IMREADJPEG
 mex_src+=matlab/src/vl_imreadjpeg.cpp
 endif
@@ -153,9 +196,11 @@ cpp_src+=matlab/src/bits/impl/subsample_cpu.cpp
 cpp_src+=matlab/src/bits/impl/copy_cpu.cpp
 cpp_src+=matlab/src/bits/impl/pooling_cpu.cpp
 cpp_src+=matlab/src/bits/impl/normalize_cpu.cpp
+cpp_src+=matlab/src/bits/impl/bnorm_cpu.cpp
 cpp_src+=matlab/src/bits/impl/tinythread.cpp
 ifdef ENABLE_IMREADJPEG
 cpp_src+=matlab/src/bits/impl/imread_$(IMAGELIB).cpp
+cpp_src+=matlab/src/bits/imread.cpp
 endif
 
 # GPU-specific files
@@ -165,10 +210,12 @@ cpp_src+=matlab/src/bits/impl/subsample_gpu.cu
 cpp_src+=matlab/src/bits/impl/copy_gpu.cu
 cpp_src+=matlab/src/bits/impl/pooling_gpu.cu
 cpp_src+=matlab/src/bits/impl/normalize_gpu.cu
+cpp_src+=matlab/src/bits/impl/bnorm_gpu.cu
 cpp_src+=matlab/src/bits/datacu.cu
 ifdef ENABLE_CUDNN
 cpp_src+=matlab/src/bits/impl/nnconv_cudnn.cu
 cpp_src+=matlab/src/bits/impl/nnpooling_cudnn.cu
+cpp_src+=matlab/src/bits/impl/nnbias_cudnn.cu
 endif
 endif
 
@@ -178,7 +225,7 @@ mex_tgt:=$(patsubst %.cu,%.mex$(MEXARCH),$(mex_tgt))
 
 cpp_tgt:=$(patsubst %.cpp,%.o,$(cpp_src))
 cpp_tgt:=$(patsubst %.cu,%.o,$(cpp_tgt))
-cpp_tgt:=$(subst matlab/src/bits/,matlab/mex/.build/,$(cpp_tgt))
+cpp_tgt:=$(subst matlab/src/,matlab/mex/.build/,$(cpp_tgt))
 
 .PHONY: all, distclean, clean, info, pack, post, post-doc, doc
 
@@ -187,9 +234,9 @@ all: $(cpp_tgt) $(mex_tgt)
 # Create build directory
 %/.stamp:
 	mkdir -p $(*)/ ; touch $(*)/.stamp
-$(mex_tgt): matlab/mex/.build/impl/.stamp
-$(cpp_tgt): matlab/mex/.build/impl/.stamp
-$(cu_tgt): matlab/mex/.build/impl/.stamp
+$(mex_tgt): matlab/mex/.build/bits/impl/.stamp
+$(cpp_tgt): matlab/mex/.build/bits/impl/.stamp
+$(cu_tgt): matlab/mex/.build/bits/impl/.stamp
 
 # Standard code
 .PRECIOUS: matlab/mex/.build/%.o
@@ -200,6 +247,11 @@ include Makefile.mex
 else
 include Makefile.nvcc
 endif
+
+matlab/mex/.build/bits/impl/imread.o : matlab/src/bits/impl/imread_helpers.hpp
+matlab/mex/.build/bits/impl/imread_quartz.o : matlab/src/bits/impl/imread_helpers.hpp
+matlab/mex/.build/bits/impl/imread_gdiplus.o : matlab/src/bits/impl/imread_helpers.hpp
+matlab/mex/.build/bits/impl/imread_libjpeg.o : matlab/src/bits/impl/imread_helpers.hpp
 
 # --------------------------------------------------------------------
 #                                                        Documentation
@@ -218,10 +270,16 @@ info: doc-info
 	@echo "cpp_tgt=$(cpp_tgt)"
 	@echo "cu_src=$(cu_src)"
 	@echo "cu_tgt=$(cu_tgt)"
+	@echo '------------------------------'
 	@echo 'MEXFLAGS=$(MEXFLAGS)'
 	@echo 'MEXFLAGS_GPU=$(MEXFLAGS_GPU)'
-	@echo 'MEXFLAGS_NVCC=$(MEXFLAGS_NVCC)'
+	@echo 'MEXFLAGS_GPU_LINK=$(MEXFLAGS_GPU_LINK)'
+	@echo '------------------------------'
+	@echo 'NVCC=$(NVCC)'
+	@echo 'NVCCVER=$(NVCCVER)'
+	@echo 'NVCCVER_LT_70=$(NVCCVER_LT_70)'
 	@echo 'NVCCFLAGS=$(NVCCFLAGS)'
+
 
 clean: doc-clean
 	find . -name '*~' -delete
@@ -237,13 +295,22 @@ pack:
 	COPYFILE_DISABLE=1 \
 	COPY_EXTENDED_ATTRIBUTES_DISABLE=1 \
 	$(GIT) archive --prefix=$(NAME)-$(VER)/ v$(VER) | gzip > $(DIST).tar.gz
+	ln -sf $(DIST).tar.gz $(LATEST).tar.gz
 
 post: pack
-	$(RSYNC) -aP $(DIST).tar.gz $(HOST)/download/
+	$(RSYNC) -aP $(DIST).tar.gz $(LATEST).tar.gz $(HOST)/download/
 
 post-models:
 	$(RSYNC) -aP data/models/*.mat $(HOST)/models/
 
 post-doc: doc
-	$(RSYNC) -aP README.md doc/matconvnet-manual.pdf $(HOST)/
-	$(RSYNC) -aP README.md doc/site/site/ $(HOST)/
+	$(RSYNC) -aP doc/matconvnet-manual.pdf $(HOST)/
+	$(RSYNC) \
+		--recursive \
+		--perms \
+	        --verbose \
+	        --delete \
+	        --exclude=download \
+	        --exclude=models \
+	        --exclude=matconvnet-manual.pdf \
+	        --exclude=.htaccess doc/site/site/ $(HOST)/
